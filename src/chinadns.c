@@ -19,15 +19,6 @@
 
 typedef struct {
   uint16_t id;
-  struct timeval ts;
-  char *buf;
-  size_t buflen;
-  struct sockaddr *addr;
-  socklen_t addrlen;
-} delay_buf_t;
-
-typedef struct {
-  uint16_t id;
   struct sockaddr *addr;
   socklen_t addrlen;
 } id_addr_t;
@@ -49,8 +40,10 @@ typedef struct {
 
 
 // avoid malloc and free
-#define BUF_SIZE 2048
+#define BUF_SIZE 512
 static char global_buf[BUF_SIZE];
+static char global_rv_buf[BUF_SIZE];
+static char compression_buf[BUF_SIZE];
 
 static int verbose = 0;
 
@@ -65,8 +58,10 @@ static const char *version = "ChinaDNS";
 static const char *default_dns_servers =
   "114.114.114.114,8.8.8.8,8.8.4.4,208.67.222.222:443,208.67.222.222:5353";
 static char *dns_servers = NULL;
-static int dns_servers_len;
-static id_addr_t *dns_server_addrs;
+static int foreign_dns_servers_len;
+static int chn_dns_servers_len;
+static id_addr_t *chn_dns_server_addrs;
+static id_addr_t *foreign_dns_server_addrs;
 
 static int parse_args(int argc, char **argv);
 
@@ -79,10 +74,6 @@ static const char *default_listen_port = "53";
 static char *listen_addr = NULL;
 static char *listen_port = NULL;
 
-static const char *default_ip_list_file = "iplist.txt";
-static char *ip_list_file = NULL;
-static ip_list_t ip_list;
-static int parse_ip_list();
 
 static char *chnroute_file = NULL;
 static net_list_t chnroute_list;
@@ -104,40 +95,26 @@ static id_addr_t *queue_lookup(uint16_t id);
 static id_addr_t id_addr_queue[ID_ADDR_QUEUE_LEN];
 static int id_addr_queue_pos = 0;
 
-#define EMPTY_RESULT_DELAY 0.3f
-#define DELAY_QUEUE_LEN 128
-static delay_buf_t delay_queue[DELAY_QUEUE_LEN];
-static void schedule_delay(uint16_t query_id, const char *buf, size_t buflen,
-                           struct sockaddr *addr, socklen_t addrlen);
-static void check_and_send_delay();
-static void free_delay(int pos);
-// next position for first, not used
-static int delay_queue_first = 0;
-// current position for last, used
-static int delay_queue_last = 0;
-static float empty_result_delay = EMPTY_RESULT_DELAY;
-
 static int local_sock;
 static int remote_sock;
 
 static const char *help_message =
-  "usage: chinadns [-h] [-l IPLIST_FILE] [-b BIND_ADDR] [-p BIND_PORT]\n"
+  "usage: chinadns [-h] [-b BIND_ADDR] [-p BIND_PORT]\n"
   "       [-c CHNROUTE_FILE] [-s DNS] [-v]\n"
   "Forward DNS requests.\n"
   "\n"
   "  -h, --help            show this help message and exit\n"
-  "  -l IPLIST_FILE        path to ip blacklist file\n"
   "  -c CHNROUTE_FILE      path to china route file\n"
   "                        if not specified, CHNRoute will be turned off\n"
   "  -d                    enable bi-directional CHNRoute filter\n"
-  "  -y                    delay time for suspects, default: 0.3\n"
   "  -b BIND_ADDR          address that listens, default: 127.0.0.1\n"
   "  -p BIND_PORT          port that listens, default: 53\n"
-  "  -s DNS                DNS servers to use, default:\n"
-  "                        114.114.114.114,208.67.222.222:443,8.8.8.8\n"
+  "  -s DNS                DNS servers intended to use,\n"
+  "                        and the format should be \"ip:port,ip:port\"\n"
+  "                        default: 114.114.114.114,208.67.222.222:443,8.8.8.8\n"
   "  -v                    verbose logging\n"
   "\n"
-  "Online help: <https://github.com/clowwindy/ChinaDNS>\n";
+  "Online help: <https://github.com/Pentiumluyu/ChinaDNS>\n";
 
 #define __LOG(o, t, v, s...) do {                                   \
   time_t now;                                                       \
@@ -181,10 +158,7 @@ int main(int argc, char **argv) {
 #endif
 
   memset(&id_addr_queue, 0, sizeof(id_addr_queue));
-  memset(&delay_queue, 0, sizeof(delay_queue));
   if (0 != parse_args(argc, argv))
-    return EXIT_FAILURE;
-  if (0 != parse_ip_list())
     return EXIT_FAILURE;
   if (0 != parse_chnroute())
     return EXIT_FAILURE;
@@ -210,7 +184,7 @@ int main(int argc, char **argv) {
       ERR("select");
       return EXIT_FAILURE;
     }
-    check_and_send_delay();
+    //check_and_send_delay();
     if (FD_ISSET(local_sock, &errorset)) {
       // TODO getsockopt(..., SO_ERROR, ...);
       VERR("local_sock error\n");
@@ -246,7 +220,6 @@ static int setnonblock(int sock) {
 static int parse_args(int argc, char **argv) {
   int ch;
   dns_servers = strdup(default_dns_servers);
-  ip_list_file = strdup(default_ip_list_file);
   listen_addr = strdup(default_listen_addr);
   listen_port = strdup(default_listen_port);
   while ((ch = getopt(argc, argv, "hb:p:s:l:c:y:dv")) != -1) {
@@ -265,12 +238,6 @@ static int parse_args(int argc, char **argv) {
       break;
     case 'c':
       chnroute_file = strdup(optarg);
-      break;
-    case 'l':
-      ip_list_file = strdup(optarg);
-      break;
-    case 'y':
-      empty_result_delay = atof(optarg);
       break;
     case 'd':
       bidirectional = 1;
@@ -293,16 +260,16 @@ static int resolve_dns_servers() {
   struct addrinfo *addr_ip;
   char* token;
   int r;
-  int i = 0;
   char *pch = strchr(dns_servers, ',');
-  int has_chn_dns = 0;
-  int has_foreign_dns = 0;
-  dns_servers_len = 1;
-  while (pch != NULL) {
-    dns_servers_len++;
-    pch = strchr(pch + 1, ',');
-  }
-  dns_server_addrs = calloc(dns_servers_len, sizeof(id_addr_t));
+  chn_dns_servers_len = 0;
+  foreign_dns_servers_len = 0;
+//  while (pch != NULL) {
+//    dns_servers_len++;
+//    pch = strchr(pch + 1, ',');
+//  }
+//  dns_server_addrs = calloc(dns_servers_len, sizeof(id_addr_t));
+  foreign_dns_server_addrs = calloc(1, sizeof(id_addr_t));
+  chn_dns_server_addrs = calloc(1, sizeof(id_addr_t));
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
@@ -323,73 +290,27 @@ static int resolve_dns_servers() {
       VERR("%s:%s\n", gai_strerror(r), token);
       return -1;
     }
-    dns_server_addrs[i].addr = addr_ip->ai_addr;
-    dns_server_addrs[i].addrlen = addr_ip->ai_addrlen;
-    i++;
     token = strtok(0, ",");
     if (test_ip_in_list(((struct sockaddr_in *)addr_ip->ai_addr)->sin_addr,
                         &chnroute_list)) {
-      has_chn_dns = 1;
+      chn_dns_server_addrs[chn_dns_servers_len].addr = addr_ip->ai_addr;
+      chn_dns_server_addrs[chn_dns_servers_len].addrlen = addr_ip->ai_addrlen;
+      chn_dns_servers_len += 1;
+      chn_dns_server_addrs = realloc(chn_dns_server_addrs, (chn_dns_servers_len+1) * sizeof(id_addr_t));
     } else {
-      has_foreign_dns = 1;
+      foreign_dns_server_addrs[foreign_dns_servers_len].addr = addr_ip->ai_addr;
+      foreign_dns_server_addrs[foreign_dns_servers_len].addrlen = addr_ip->ai_addrlen;
+      foreign_dns_servers_len += 1;
+      foreign_dns_server_addrs = realloc(foreign_dns_server_addrs, (foreign_dns_servers_len+1) * sizeof(id_addr_t));
     }
   }
   if (chnroute_file) {
-    if (!(has_chn_dns && has_foreign_dns)) {
+    if (!(chn_dns_servers_len && foreign_dns_servers_len)) {
       VERR("You should have at least one Chinese DNS and one foreign DNS when "
           "chnroutes is enabled\n");
       return 0;
     }
   }
-  return 0;
-}
-
-static int cmp_in_addr(const void *a, const void *b) {
-  struct in_addr *ina = (struct in_addr *)a;
-  struct in_addr *inb = (struct in_addr *)b;
-  if (ina->s_addr == inb->s_addr)
-    return 0;
-  if (ina->s_addr > inb->s_addr)
-    return 1;
-  return -1;
-}
-
-static int parse_ip_list() {
-  FILE *fp;
-  char line_buf[32];
-  char *line = NULL;
-  size_t len = sizeof(line_buf);
-  ssize_t read;
-  ip_list.entries = 0;
-  int i = 0;
-
-  fp = fopen(ip_list_file, "rb");
-  if (fp == NULL) {
-    ERR("fopen");
-    VERR("Can't open ip list: %s\n", ip_list_file);
-    return -1;
-  }
-  while ((line = fgets(line_buf, len, fp))) {
-    ip_list.entries++;
-  }
-
-  ip_list.ips = calloc(ip_list.entries, sizeof(struct in_addr));
-  if (0 != fseek(fp, 0, SEEK_SET)) {
-    VERR("fseek");
-    return -1;
-  }
-  while ((line = fgets(line_buf, len, fp))) {
-    char *sp_pos;
-    sp_pos = strchr(line, '\r');
-    if (sp_pos) *sp_pos = 0;
-    sp_pos = strchr(line, '\n');
-    if (sp_pos) *sp_pos = 0;
-    inet_aton(line, &ip_list.ips[i]);
-    i++;
-  }
-
-  qsort(ip_list.ips, ip_list.entries, sizeof(struct in_addr), cmp_in_addr);
-  fclose(fp);
   return 0;
 }
 
@@ -529,6 +450,7 @@ static void dns_handle_local() {
   socklen_t src_addrlen = sizeof(struct sockaddr);
   uint16_t query_id;
   ssize_t len;
+  ssize_t clen;
   int i;
   const char *question_hostname;
   ns_msg msg;
@@ -549,9 +471,36 @@ static void dns_handle_local() {
     id_addr.addr = src_addr;
     id_addr.addrlen = src_addrlen;
     queue_add(id_addr);
-    for (i = 0; i < dns_servers_len; i++) {
+    //use compression pointer for foreign dns
+    if (len > 16){
+      size_t off = 12;
+      int ended = 0;
+      while (off < len - 4){
+        if (global_buf[off] & 0xc0)
+          break;
+        if (global_buf[off] == 0){
+          ended = 1;
+          off ++;
+          break;
+        }
+        off += 1 + global_buf[off];
+      }
+      if (ended) {
+        memcpy(compression_buf, global_buf, off-1);
+        memcpy(compression_buf + off + 1, global_buf + off, len - off);
+        compression_buf[off-1] = '\xc0';
+        compression_buf[off] = '\x04';
+        clen = len + 1;
+      }
+      }
+    for (i = 0; i < chn_dns_servers_len; i++) {
       if (-1 == sendto(remote_sock, global_buf, len, 0,
-                       dns_server_addrs[i].addr, dns_server_addrs[i].addrlen))
+                       chn_dns_server_addrs[i].addr, chn_dns_server_addrs[i].addrlen))
+        ERR("sendto");
+    }
+    for (i = 0; i < foreign_dns_servers_len; i++) {
+      if (-1 == sendto(remote_sock, compression_buf, clen, 0,
+                       foreign_dns_server_addrs[i].addr, foreign_dns_server_addrs[i].addrlen))
         ERR("sendto");
     }
   }
@@ -565,11 +514,11 @@ static void dns_handle_remote() {
   uint16_t query_id;
   ssize_t len;
   const char *question_hostname;
-  int r;
+  //int r;
   ns_msg msg;
-  len = recvfrom(remote_sock, global_buf, BUF_SIZE, 0, src_addr, &src_len);
+  len = recvfrom(remote_sock, global_rv_buf, BUF_SIZE, 0, src_addr, &src_len);
   if (len > 0) {
-    if (ns_initparse((const u_char *)global_buf, len, &msg) < 0) {
+    if (ns_initparse((const u_char *)global_rv_buf, len, &msg) < 0) {
       ERR("ns_initparse");
       free(src_addr);
       return;
@@ -586,18 +535,12 @@ static void dns_handle_remote() {
     id_addr_t *id_addr = queue_lookup(query_id);
     if (id_addr) {
       id_addr->addr->sa_family = AF_INET;
-      r = should_filter_query(msg, ((struct sockaddr_in *)src_addr)->sin_addr);
-      if (r == 0) {
+      if (!should_filter_query(msg, ((struct sockaddr_in *)src_addr)->sin_addr)) {
         if (verbose)
           printf("pass\n");
-        if (-1 == sendto(local_sock, global_buf, len, 0, id_addr->addr,
+        if (-1 == sendto(local_sock, global_rv_buf, len, 0, id_addr->addr,
                         id_addr->addrlen))
           ERR("sendto");
-      } else if (r == -1) {
-        schedule_delay(query_id, global_buf, len, id_addr->addr,
-                       id_addr->addrlen);
-        if (verbose)
-          printf("delay\n");
       } else {
         if (verbose)
           printf("filter\n");
@@ -663,14 +606,16 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
   void *r;
   // TODO cache result for each dns server
   int dns_is_chn = 0;
-  int dns_is_foreign = 0;
-  if (chnroute_file && (dns_servers_len > 1)) {
-    dns_is_chn = test_ip_in_list(dns_addr, &chnroute_list);
-    dns_is_foreign = !dns_is_chn;
+  int i;
+  if (chnroute_file && (foreign_dns_servers_len > 0)) {
+    for (i = 0; i < chn_dns_servers_len; i++){
+       if(dns_addr.s_addr == ((struct sockaddr_in *)chn_dns_server_addrs[i].addr)->sin_addr.s_addr){
+          dns_is_chn = 1;
+          break;
+          }
+    }
   }
   rrmax = ns_msg_count(msg, ns_s_an);
-  if (rrmax == 0)
-    return -1;
   for (rrnum = 0; rrnum < rrmax; rrnum++) {
     if (ns_parserr(&msg, ns_s_an, rrnum, &rr)) {
       ERR("ns_parserr");
@@ -683,13 +628,9 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
     if (type == ns_t_a) {
       if (verbose)
         printf("%s, ", inet_ntoa(*(struct in_addr *)rd));
-      r = bsearch(rd, ip_list.ips, ip_list.entries, sizeof(struct in_addr),
-                  cmp_in_addr);
-      if (r)
-        return 1;
       if (test_ip_in_list(*(struct in_addr *)rd, &chnroute_list)) {
         // result is chn
-        if (dns_is_foreign) {
+        if (!dns_is_chn) {
           if (bidirectional) {
             // filter DNS result from chn dns if result is outside chn
             return 1;
@@ -704,77 +645,5 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
       }
     }
   }
-  if (rrmax == 1)
-    return -1;
   return 0;
-}
-
-static void schedule_delay(uint16_t query_id, const char *buf, size_t buflen,
-                           struct sockaddr *addr, socklen_t addrlen) {
-  int i;
-  int found = 0;
-  struct timeval now;
-  gettimeofday(&now, 0);
-
-  delay_buf_t *delay_buf = &delay_queue[delay_queue_last];
-
-  // first search for existed item with query_id and replace it
-  for (i = delay_queue_first;
-       i != delay_queue_last;
-       i = (i + 1) % DELAY_QUEUE_LEN) {
-    delay_buf_t *delay_buf2 = &delay_queue[i];
-    if (delay_buf2->id == query_id) {
-      free_delay(i);
-      delay_buf = &delay_queue[i];
-      found = 1;
-    }
-  }
-
-  delay_buf->id = query_id;
-  delay_buf->ts = now;
-  delay_buf->buf = malloc(buflen);
-  memcpy(delay_buf->buf, buf, buflen);
-  delay_buf->buflen = buflen;
-  delay_buf->addr = malloc(addrlen);
-  memcpy(delay_buf->addr, addr, addrlen);
-  delay_buf->addrlen = addrlen;
-
-  // then append to queue
-  if (!found) {
-    delay_queue_last = (delay_queue_last + 1) % DELAY_QUEUE_LEN;
-    if (delay_queue_last == delay_queue_first) {
-      free_delay(delay_queue_first);
-      delay_queue_first = (delay_queue_first + 1) % DELAY_QUEUE_LEN;
-    }
-  }
-}
-
-float time_diff(struct timeval t0, struct timeval t1) {
-  return (t1.tv_sec - t0.tv_sec) +
-      (t1.tv_usec - t0.tv_usec) / 1000000.0f;
-}
-
-static void check_and_send_delay() {
-  struct timeval now;
-  int i;
-  gettimeofday(&now, 0);
-  for (i = delay_queue_first;
-       i != delay_queue_last;
-       i = (i + 1) % DELAY_QUEUE_LEN) {
-    delay_buf_t *delay_buf = &delay_queue[i];
-    if (time_diff(delay_buf->ts, now) > empty_result_delay) {
-      if (-1 == sendto(local_sock, delay_buf->buf, delay_buf->buflen, 0,
-                       delay_buf->addr, delay_buf->addrlen))
-        ERR("sendto");
-      free_delay(i);
-      delay_queue_first = (delay_queue_first + 1) % DELAY_QUEUE_LEN;
-    } else {
-      break;
-    }
-  }
-}
-
-static void free_delay(int pos) {
-  free(delay_queue[pos].buf);
-  free(delay_queue[pos].addr);
 }

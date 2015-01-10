@@ -4,7 +4,9 @@ ChinaDNS
 [![Build Status]][Travis CI]
 [![Coverage Status]][Coverage]
 
-Fix [weird things] with DNS in China.
+Fork form https://github.com/clowwindy/ChinaDNS
+
+Use [DNS compression pointer mutation] instead of filtering bad ip addresses and delaying.
 
 If you want to fix other weird things as well, you might also want to use [ShadowVPN].
 
@@ -20,14 +22,11 @@ Install
 
 * OpenWRT
 
-    * [Download precompiled] for OpenWRT trunk and CPU: ar71xx, brcm63xx,
-      brcm47xx, ramips_24kec. Open an issue if you think your CPU is a popular
-      one but not listed here.
-    * If you use other CPU or other OpenWRT versions, build yourself:
+    * Build yourself:
       cd into [SDK] root, then
 
             pushd package
-            git clone https://github.com/clowwindy/ChinaDNS.git
+            git clone https://github.com/Pentiumluyu/ChinaDNS.git
             popd
             make menuconfig # select Network/ChinaDNS
             make -j
@@ -41,21 +40,17 @@ Install
       `~/WRT54GL-US_v4.30.11_11/tools/` to `/opt`, then
 
             export PATH=/opt/brcm/hndtools-mipsel-uclibc/bin/:/opt/brcm/hndtools-mipsel-linux/bin/:$PATH
-            git clone https://github.com/clowwindy/ChinaDNS.git
+            git clone https://github.com/Pentiumluyu/ChinaDNS.git
             cd ChinaDNS
             ./autogen.sh && ./configure --host=mipsel-linux --enable-static && make
-
-* Windows
-
-    [Download] Python exe version.
 
 Usage
 -----
 
 * Linux / Unix
 
-    Run `sudo chinadns -l iplist.txt` on your local machine. ChinaDNS creates a
-    UDP DNS Server at `0.0.0.0:53`.
+    Run `sudo chinadns -c path_to_chnroute_file` on your local machine. 
+    ChinaDNS creates a UDP DNS Server at `0.0.0.0:53`.
 
 * OpenWRT
 
@@ -108,21 +103,22 @@ add a redirect rule for TCP:
 Advanced
 --------
 
-    usage: chinadns [-h] [-l IPLIST_FILE] [-b BIND_ADDR] [-p BIND_PORT]
-           [-c CHNROUTE_FILE] [-s DNS] [-v]
-    Forward DNS requests.
+  usage: chinadns [-h] [-b BIND_ADDR] [-p BIND_PORT]
+         [-c CHNROUTE_FILE] [-s DNS] [-v]
+  Forward DNS requests.
 
     -h, --help            show this help message and exit
-    -l IPLIST_FILE        path to ip blacklist file
     -c CHNROUTE_FILE      path to china route file
                           if not specified, CHNRoute will be turned off
     -d                    enable bi-directional CHNRoute filter
-    -y                    delay time for suspects, default: 0.3
     -b BIND_ADDR          address that listens, default: 127.0.0.1
     -p BIND_PORT          port that listens, default: 53
-    -s DNS                DNS servers to use, default:
-                          114.114.114.114,208.67.222.222:443,8.8.8.8
+    -s DNS                DNS servers intended to use,
+                          and the format should be "ip:port,ip:port"
+                          default: 114.114.114.114,208.67.222.222:443,8.8.8.8
     -v                    verbose logging
+
+    Online help: <https://github.com/Pentiumluyu/ChinaDNS>
 
 About chnroute
 --------------
@@ -140,19 +136,12 @@ Bugs and Issues
 ----------------
 Please visit [Issue Tracker]
 
-Mailing list: http://groups.google.com/group/shadowsocks
 
-
-[Build Status]:         https://travis-ci.org/clowwindy/ChinaDNS.svg?branch=master
-[ChinaDNS]:             https://github.com/clowwindy/ChinaDNS
-[Coverage Status]:      http://192.81.132.184/result/chinadns
-[Coverage]:             http://192.81.132.184/job/ChinaDNS/ws/src/index.html
-[Download]:             https://sourceforge.net/projects/chinadns/files/dist/
-[Issue Tracker]:        https://github.com/clowwindy/ChinaDNS/issues?state=open
+[Issue Tracker]:        https://github.com/Pentiumluyu/ChinaDNS/issues?state=open
 [Download precompiled]: https://sourceforge.net/projects/chinadns/files/dist/
-[Download a release]:   https://github.com/clowwindy/ChinaDNS/releases
+[Download a release]:   https://github.com/Pentiumluyu/ChinaDNS/releases
 [SDK]:                  http://wiki.openwrt.org/doc/howto/obtain.firmware.sdk
 [ShadowVPN]:            https://github.com/clowwindy/ShadowVPN
 [Tomato toolchain]:     http://downloads.linksysbycisco.com/downloads/WRT54GL_v4.30.11_11_US.tgz
-[Travis CI]:            https://travis-ci.org/clowwindy/ChinaDNS
 [weird things]:         http://en.wikipedia.org/wiki/Great_Firewall_of_China#Blocking_methods
+[DNS compression pointer mutation]: https://gist.github.com/klzgrad/f124065c0616022b65e5

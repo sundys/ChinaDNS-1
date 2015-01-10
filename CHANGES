@@ -1,3 +1,6 @@
+1.2.2 2015-01-10
+- Use DNS compression pointer mutation instead of filtering bad ip addresses and delaying
+
 1.2.1 2015-01-01
 - Fix high CPU usage
 
