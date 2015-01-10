@@ -1,9 +1,6 @@
 ChinaDNS
 ========
 
-[![Build Status]][Travis CI]
-[![Coverage Status]][Coverage]
-
 Fork form https://github.com/clowwindy/ChinaDNS
 
 Use [DNS compression pointer mutation] instead of filtering bad ip addresses and delaying.
